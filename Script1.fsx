@@ -8,14 +8,11 @@ open FParsec
 
 
 //Types
-type Term = | Function of int * Term list
+type Expr = | Variable of int
             | Constant of int
-            | Variable of int
-
-type Predicate = | Predicate of int * Term list
-                 | Equality of Term * Term
-
-type Expr = | Atom of Predicate
+            | Function of int * Expr list
+            | Predicate of int * Expr list            
+            | Equality of Expr * Expr
             | Not of Expr
             | And of Expr * Expr
             | Or of Expr * Expr
@@ -152,7 +149,7 @@ let quantifiedExpr isForAll =
 opp.TermParser <- choice [
    quantifiedExpr true
    quantifiedExpr false
-   predicate |>> Atom
+   predicate
    between (str_ws "(") (str_ws ")") expr
 ]   
 opp.AddOperator(PrefixOperator("!", ws, 5, true, fun x -> Not x))
@@ -166,4 +163,110 @@ let test p str =
     | Success(result, st, _)   -> printfn "Success: %A, state: %A" result st
     | Failure(errorMsg, _, _) -> printfn "Failure: %s" errorMsg
 
-test expr "@A x,y (@E x P1(x) & F1(x) = F2(x)) & P2(x) & P3(y)"
+//test expr "@A x,y (@E x P1(x) & F1(x) = F2(x)) & P2(x) & P3(y)"
+
+let rec exprToString (expr, st) = 
+    let getName id = 
+        fst (List.find (fun (_,i) -> i = id) st.nonVarMap)
+
+    let funcOrPredToString (i, ts, st) = 
+        sprintf "%s(%s)" (getName i) ((ts |> List.fold (fun s t -> s + (exprToString (t,st)) + ",") "").TrimEnd(','))
+
+    match expr with
+    | Variable i -> sprintf "x%d" i
+    | Constant i -> getName i
+    | Function (i,ts) -> funcOrPredToString (i,ts,st)
+    | Predicate (i,ts) -> funcOrPredToString (i,ts,st)
+    | Equality (t1,t2) -> sprintf "%s = %s" (exprToString (t1,st)) (exprToString (t2, st))
+    | _ -> failwith "Not implemented yet"
+
+//Theorem proving
+let getExpr st s = 
+    match runParserOnString expr st "" s with
+    | Success(result, st, _)   -> (result, st)
+    | Failure(errorMsg, _, _) -> failwith errorMsg
+
+let getPredForAll st s = 
+    let (e, st) = getExpr st ("@A x,y,z,w " + s)
+    match e with
+    | ForAll (_, pred) -> (pred, st)
+    | _ -> failwith ""
+
+module Unify =   
+    type CompExprOp = | Function of int
+                      | Predicate of int
+                      | Equality
+
+    type UniExpr = | Constant of int
+                   | CompExprOp of CompExprOp
+                   | Variable of int                   
+                   | List of UniExpr list
+                   | CompExpr of CompExprOp * UniExpr list
+
+    let rec getUniExpr expr = 
+        match expr with
+        | Expr.Variable i -> Variable i
+        | Expr.Constant i -> Constant i
+        | Expr.Function (i,ts) -> CompExpr (CompExprOp.Function i, ts |> List.map getUniExpr)
+        | Expr.Predicate (i,ts) -> CompExpr (CompExprOp.Predicate i, ts |> List.map getUniExpr)
+        | Expr.Equality (t1,t2) -> CompExpr (CompExprOp.Equality, [getUniExpr t1; getUniExpr t2])
+        | _ -> failwith "Can't get unification expression from given expression"
+
+    let rec getExpr uniExpr = 
+        match uniExpr with
+        | Constant i -> Expr.Constant i
+        | Variable i -> Expr.Variable i
+        | CompExpr (op, args) -> 
+            match op with
+            | Function i -> Expr.Function (i, args |> List.map getExpr)
+            | Predicate i -> Expr.Predicate (i, args |> List.map getExpr)
+            | Equality -> Expr.Equality (getExpr args.[0], getExpr args.[1])
+        | _ -> failwith ""
+
+    let rec unify x y su = 
+        if Option.isNone su then None else
+
+        match (x,y) with
+        | (Constant xi, Constant yi) -> if xi = yi then su else None
+        | (CompExprOp xo, CompExprOp yo) -> if xo = yo then su else None
+        | (Variable i, _) -> unifyVar i y (Option.get su)
+        | (_, Variable i) -> unifyVar i x (Option.get su)
+        | (List [], List []) -> su
+        | (List (xf::xr), List (yf::yr)) -> unify (List xr) (List yr) (unify xf yf su)
+        | (CompExpr (xo, xargs), CompExpr (yo, yargs)) -> unify (List xargs) (List yargs) (unify (CompExprOp xo) (CompExprOp yo) su)
+        | _ -> None
+
+    and unifyVar var x su = 
+        let tryFind i f1 f2 = 
+            match su |> List.tryFind (fun (li, _) -> li = i) with
+            | Some (_,e) -> f1 e
+            | None -> f2 ()
+
+        let add () = Some ((var, x)::su)
+
+        tryFind var (fun e -> unify e x (Some su)) (fun () ->
+            match x with
+            | Variable xi -> tryFind xi (fun e -> unify (Variable var) x (Some su)) add
+            | _ -> add()        
+        )  
+        
+let unify x y = 
+    Unify.unify (Unify.getUniExpr x) (Unify.getUniExpr y) (Some [])
+
+
+let strs = [ 
+    "Knows(John, x)"
+    "Knows(John, Jane)"
+    "Knows(y, Bill)"
+    "Knows(y, Mother(y))"
+    "Knows(x, Elisabeth)"
+]
+
+let (es, st) = List.mapFold getPredForAll newState strs
+     
+
+
+
+
+
+    
