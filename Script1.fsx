@@ -203,6 +203,7 @@ module Unify =
                    | List of UniExpr list
                    | CompExpr of CompExprOp * UniExpr list
 
+    //Converters Expr <-> UniExpr for unification
     let rec getUniExpr expr = 
         match expr with
         | Expr.Variable i -> Variable i
@@ -223,6 +224,16 @@ module Unify =
             | Equality -> Expr.Equality (getExpr args.[0], getExpr args.[1])
         | _ -> failwith ""
 
+    //Fixes incomplete subst, ex. {x / Mother(y); y / John} -> {x / Mother(John); y / John}
+    let rec fixVarsInSubst su e =
+        match e with
+        | Variable i -> 
+            match su |> List.tryFind (fun (id, _) -> id = i) with
+            | None -> Variable i
+            | Some (_,s) -> fixVarsInSubst su s
+        | CompExpr (op, args) -> CompExpr (op, args |> List.map (fixVarsInSubst su))            
+        | x -> x
+
     let rec unify x y su = 
         if Option.isNone su then None else
 
@@ -237,22 +248,47 @@ module Unify =
         | _ -> None
 
     and unifyVar var x su = 
+        //Executes f1 if subst is already there and f2 if not
         let tryFind i f1 f2 = 
             match su |> List.tryFind (fun (li, _) -> li = i) with
             | Some (_,e) -> f1 e
             | None -> f2 ()
 
+        //Adds new subst
         let add () = Some ((var, x)::su)
 
+        //If var is found in subst replace it and unify again
         tryFind var (fun e -> unify e x (Some su)) (fun () ->
-            match x with
-            | Variable xi -> tryFind xi (fun e -> unify (Variable var) x (Some su)) add
-            | _ -> add()        
+        
+        //else
+        match x with
+        //if x is Variable too
+        | Variable xi -> 
+            //And x is found in subst replace it and unify again
+            tryFind xi (fun e -> unify (Variable var) x (Some su)) 
+            
+            //else
+                add
+        | _ -> add()        
         )  
         
 let unify x y = 
-    Unify.unify (Unify.getUniExpr x) (Unify.getUniExpr y) (Some [])
+    match Unify.unify (Unify.getUniExpr x) (Unify.getUniExpr y) (Some []) with
+    | None -> None
+    | Some su -> Some (su |> List.map (fun (i, u) -> (i, u |> Unify.fixVarsInSubst su |> Unify.getExpr)))
 
+let substToString st s = 
+    match s with
+    | None -> "No substitution"
+    | Some l -> l 
+                |> List.map (fun (i, su) -> sprintf "x%d / %s" i (exprToString (su,st))) 
+                |> List.reduce (fun s1 s2 -> s1 + "; " + s2)
+
+let testUnify st x y =
+    sprintf "(%s) unifying with (%s) gives {%s}"
+        (exprToString (x,st))
+        (exprToString (y,st))
+        (substToString st (unify x y))
 
 let strs = [ 
     "Knows(John, x)"
@@ -260,6 +296,7 @@ let strs = [
     "Knows(y, Bill)"
     "Knows(y, Mother(y))"
     "Knows(x, Elisabeth)"
+    "Knows(y, z)"
 ]
 
 let (es, st) = List.mapFold getPredForAll newState strs
