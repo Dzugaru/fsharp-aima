@@ -224,22 +224,57 @@ module Unify =
             | Equality -> Expr.Equality (getExpr args.[0], getExpr args.[1])
         | _ -> failwith ""
 
-    //Fixes incomplete subst, ex. {x / Mother(y); y / John} -> {x / Mother(John); y / John}
-    let rec fixVarsInSubst su e =
+    let mapTillNone f l =
+        let rec map lo li = 
+            match li with
+            | [] -> Some lo
+            | x::xs -> 
+                match f x with
+                | Some y -> map (y::lo) xs
+                | None -> None
+
+        map [] l
+
+   
+    ///<summary>Fixes one subst expression in subst list</summary>
+    ///<param name="su">Subst list</param>
+    ///<param name="e">Subst expression</param>
+    ///<param name="uv">Used variables list to detect hopeless loops</param>
+    ///<returns>Some fixed expression or None if substitution is impossible</returns>
+    let rec fixVarsInSubstExpr su uv e  =
+        //printfn "%A %A %A" su uv e
+
         match e with
         | Variable i -> 
+            if uv |> List.contains i then None else
+
             match su |> List.tryFind (fun (id, _) -> id = i) with
-            | None -> Variable i
-            | Some (_,s) -> fixVarsInSubst su s
-        | CompExpr (op, args) -> CompExpr (op, args |> List.map (fixVarsInSubst su))            
-        | x -> x
+            | None -> Some (Variable i)
+            | Some (_,s) -> fixVarsInSubstExpr su (i::uv) s 
+        | CompExpr (op, args) ->            
+            match args |> mapTillNone (fixVarsInSubstExpr su uv) with
+            | None -> None
+            | Some args' -> Some (CompExpr (op, args'))            
+        | x -> Some x
+
+    ///<summary>Fixes incomplete subst, ex. {x / Mother(y); y / John} -> {x / Mother(John); y / John}
+    ///Also finds loops that make substitution impossible like {x / F(y); y / F(x)}</summary>
+    ///<param name="su">Subst list</param>
+    ///<returns>Some fixed subst list or None if substitution is impossible</returns>
+    let rec fixVarsInSubst su =
+        su |> mapTillNone (fun (i, se) ->
+            let se' = se |> fixVarsInSubstExpr su []
+            match se' with
+            | None -> None
+            | Some se' -> Some (i,se')
+        )
 
     let rec unify x y su = 
         if Option.isNone su then None else
 
         match (x,y) with
         | (Constant xi, Constant yi) -> if xi = yi then su else None
-        | (CompExprOp xo, CompExprOp yo) -> if xo = yo then su else None
+        | (CompExprOp xo, CompExprOp yo) -> if xo = yo then su else None        
         | (Variable i, _) -> unifyVar i y (Option.get su)
         | (_, Variable i) -> unifyVar i x (Option.get su)
         | (List [], List []) -> su
@@ -265,17 +300,22 @@ module Unify =
         //if x is Variable too
         | Variable xi -> 
             //And x is found in subst replace it and unify again
-            tryFind xi (fun e -> unify (Variable var) x (Some su)) 
-            
-            //else
-                add
+            tryFind xi (fun e -> unify (Variable var) x (Some su))  (fun () ->            
+                //else if variables are the same
+                if xi = var then Some su else
+                //else
+                add()
+            )
         | _ -> add()        
         )  
         
 let unify x y = 
     match Unify.unify (Unify.getUniExpr x) (Unify.getUniExpr y) (Some []) with
     | None -> None
-    | Some su -> Some (su |> List.map (fun (i, u) -> (i, u |> Unify.fixVarsInSubst su |> Unify.getExpr)))
+    | Some su -> 
+        match su |> Unify.fixVarsInSubst with
+        | None -> None
+        | Some su' -> Some (su' |> List.map (fun (i, se) -> (i, se |> Unify.getExpr)))
 
 let substToString st s = 
     match s with
@@ -291,6 +331,8 @@ let testUnify st x y =
         (substToString st (unify x y))
 
 let strs = [ 
+    "Test(x, F(x))"
+    "Test(F(x), x)"
     "Knows(John, x)"
     "Knows(John, Jane)"
     "Knows(y, Bill)"
